@@ -21,7 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,9 +47,34 @@ UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 uint8_t rxByte;
+uint8_t buttonPrev = 1;
+uint32_t buttonDebounce = 0;
 volatile uint8_t mode = 1;
+uint8_t prev_mode = 1;
 volatile uint8_t control = 's';
 volatile uint8_t servo = 'R';
+uint8_t irValue = 0;
+
+static uint8_t case2_triggered = 0;
+static uint32_t case2_startTick = 0;
+static uint8_t junctionDetected = 0;
+static uint32_t cooldown1 = 0;
+static uint16_t junctionCounter = 0;
+static uint32_t junctionStartTime = 0;
+static uint8_t lastSent = 0;
+
+static uint8_t junction2Detected = 0;
+static uint32_t cooldown2 = 0;
+static uint16_t junction2Counter = 0;
+static uint32_t junction2StartTime = 0;
+static uint8_t lastSentJ2 = 0;
+static uint8_t j2StopTrigger = 0;
+static uint32_t j2StartTick = 0;
+
+static uint32_t RotateStartTime = 0;
+static uint8_t rotated = 0;
+static uint32_t settleStart = 0;
+
 
 /* USER CODE END PV */
 
@@ -72,6 +97,7 @@ void Right(void);
 void Stop(void);
 void Grip(void);
 void Release(void);
+void ModeLED(uint8_t);
 /* USER CODE END 0 */
 
 /**
@@ -111,8 +137,6 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1); // motor
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1); // motor
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_4); // servo
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 99);
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 99);
   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_4, 24);
 
   /* USER CODE END 2 */
@@ -124,6 +148,31 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	uint8_t buttonNow = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2);
+
+	if (buttonPrev == 1 && buttonNow == 0)
+	{
+	    if (HAL_GetTick() - buttonDebounce > 10)
+	    {
+	        mode++;
+	        if (mode > 4)
+	        	mode = 1;
+	        buttonDebounce = HAL_GetTick();
+	    }
+	}
+
+	buttonPrev = buttonNow;
+
+	irValue =  (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12) << 3)|(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13) << 2)|
+			(HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14) << 1)|HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15);
+
+	if (mode != prev_mode)
+	{
+		case2_triggered = 0;
+		prev_mode = mode;
+		ModeLED(mode);
+	}
+
 	switch(mode)
 	{
 		case 1:
@@ -143,21 +192,193 @@ int main(void)
 		  }
 		  break;
 		case 2:
-		  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-		  HAL_Delay(2000);
-		  break;
 		case 3:
-		  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-		  HAL_Delay(3000);
-		  break;
 		case 4:
-		  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-		  HAL_Delay(4000);
-		  break;
+			if(!case2_triggered && (irValue == 0x0))
+			{
+				Forward();
+				case2_triggered = 1;
+				case2_startTick = HAL_GetTick();
+				junctionStartTime = 0;
+				junction2StartTime = 0;
+				RotateStartTime =0;
+			}
+
+			if(case2_triggered && !j2StopTrigger)
+			{
+				if(HAL_GetTick() - case2_startTick >= 1000)
+				{
+					if ((mode == 3 && junctionCounter >= 2 && junction2Counter <= 1) ||
+							(mode == 4 && junctionCounter >= 2 && junction2Counter <= 2))
+					{
+						switch(irValue)
+						{
+							case 0b0110:case 0b1110:
+								Forward();
+								break;
+							case 0b0100:case 0b1000:case 0b1100:
+								Left();
+								break;
+							case 0b0010:case 0b0001:case 0b0011:case 0b0111:case 0b0000:case 0b1111:
+								Right();
+								break;
+							default:
+								Stop();
+								break;
+						}
+					}
+					else
+					{
+						switch(irValue)
+						{
+							case 0b0110:
+								Forward();
+								break;
+							case 0b0100:case 0b1110:case 0b1000:case 0b1100:
+								Left();
+								break;
+							case 0b0010:case 0b0001:case 0b0011:case 0b0111:case 0b0000:case 0b1111:
+								Right();
+								break;
+							default:
+								Stop();
+								break;
+						}
+					}
+
+			        if(HAL_GetTick() - case2_startTick >= 4000)
+			        {
+						if (irValue == 0b0111)
+						{
+		                    if(junctionStartTime == 0)
+		                        junctionStartTime = HAL_GetTick();
+		                    else if(HAL_GetTick() - junctionStartTime >= 120)
+		                    {
+		                        if(!junctionDetected && (HAL_GetTick() - cooldown1 >= 2000))
+		                        {
+		                            junctionCounter++;
+		                            junctionDetected = 1;
+		                            cooldown1 = HAL_GetTick();
+		                        }
+		                    }
+						}
+
+		                else
+		                {
+		                    junctionStartTime = 0;
+		                    junctionDetected = 0;
+		                }
+
+						if (junctionCounter != lastSent)
+						{
+							char msg[20];
+							int len = sprintf(msg, "J:%d\n", junctionCounter);
+							HAL_UART_Transmit(&huart1, (uint16_t*)msg, len, 10);
+							lastSent = junctionCounter;
+						}
+			        }
+
+			        if(junctionCounter >= 2)
+					{
+			            if(j2StartTick == 0)
+			            	j2StartTick = HAL_GetTick();
+
+			            if(HAL_GetTick() - j2StartTick >= 750)
+			            {
+			            	if(irValue == 0b1110)
+			            	{
+								if(junction2StartTime == 0)
+									junction2StartTime = HAL_GetTick();
+								else if(HAL_GetTick() - junction2StartTime >= 50)
+								{
+									if(!junction2Detected && (HAL_GetTick()-cooldown2 >= 350))
+									{
+										junction2Counter++;
+										junction2Detected = 1;
+										cooldown2 = HAL_GetTick();
+										if(junction2Counter >= mode-1)
+										{
+											j2StopTrigger = 1;
+											Stop();
+										}
+									}
+								}
+			            	}
+			            	else
+			            	{
+			            		junction2StartTime = 0;
+								junction2Detected = 0;
+			            	}
+			            	if(junction2Counter != lastSentJ2)
+			            	{
+								char msg2[20];
+								int len2 = sprintf(msg2, "J2:%d\n", junction2Counter);
+								HAL_UART_Transmit(&huart1, (uint8_t*)msg2, len2, 10);
+								lastSentJ2 = junction2Counter;
+			            	}
+			            }
+					}
+			        else
+			        {
+			        	j2StartTick = 0;
+			        }
+				}
+			}
+			else if (j2StopTrigger==1)
+			{
+			    if (RotateStartTime == 0)
+			    {
+			    	Left();
+			    	RotateStartTime = HAL_GetTick();
+			    }
+
+			    if (!rotated && (HAL_GetTick() - RotateStartTime >= 500))
+			    {
+			        if (irValue == 0b0110)
+			        {
+			        	rotated = 1;
+			        	settleStart = HAL_GetTick();
+			            Stop();
+			        }
+			    }
+
+			    if (rotated)
+				{
+			        if (HAL_GetTick() - settleStart < 100)
+			        {
+			            Stop();
+			        }
+			        else
+			        {
+			        	switch(irValue)
+						{
+							case 0b0110:
+								Forward();
+								break;
+							case 0b0100:case 0b1110:case 0b1000:case 0b1100:case 0b0000:
+								Left();
+								break;
+							case 0b0010:case 0b0001:case 0b0011:case 0b0111:
+								Right();
+								break;
+							case 0b1111:
+								j2StopTrigger=2;
+								Grip();
+								break;
+							default:
+								Stop();
+								break;
+						}
+			        }
+				}
+			}
+			else if(j2StopTrigger==2)
+			{
+				Stop();
+			}
+			break;
 		default:
-		  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-		  HAL_Delay(500);
-		  break;
+			break;
 	}
   }
   /* USER CODE END 3 */
@@ -394,7 +615,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11|GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_11
+                          |GPIO_PIN_12, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5|GPIO_PIN_7, GPIO_PIN_RESET);
@@ -406,12 +628,26 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PA11 PA12 */
-  GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12;
+  /*Configure GPIO pin : PA2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PA5 PA6 PA7 PA11
+                           PA12 */
+  GPIO_InitStruct.Pin = GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_11
+                          |GPIO_PIN_12;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PB12 PB13 PB14 PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PB5 PB7 */
   GPIO_InitStruct.Pin = GPIO_PIN_5|GPIO_PIN_7;
@@ -469,8 +705,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+void ModeLED(uint8_t mode)
+{
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, (mode & 0x01) ? 1 : 0);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, (mode & 0x02) ? 1 : 0);
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, (mode & 0x04) ? 1 : 0);
+}
+
+
 void Forward(void)
 {
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 59);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 59);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 0);
@@ -479,6 +725,8 @@ void Forward(void)
 
 void Backward(void)
 {
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 59);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 59);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 0);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 1);
@@ -487,6 +735,8 @@ void Backward(void)
 
 void Left(void)
 {
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 49);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 49);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 0);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 0);
@@ -495,6 +745,8 @@ void Left(void)
 
 void Right(void)
 {
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 49);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 49);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 1);
