@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,6 +54,9 @@ volatile uint8_t mode = 1;
 uint8_t prev_mode = 1;
 volatile uint8_t control = 's';
 volatile uint8_t servo = 'R';
+char uartBuffer[32];
+uint8_t uartIndex = 0;
+volatile uint16_t SB=600, J1B=6000, J1F=125, J2B=1500, J2F=125, R1B=500, RBS=6000, LL=1000, RB=8000, RIF=120;
 uint8_t irValue = 0;
 
 static uint8_t case2_triggered = 0;
@@ -75,7 +79,13 @@ static uint32_t RotateStartTime = 0;
 static uint8_t rotated = 0;
 static uint32_t settleStart = 0;
 
+static uint32_t RotateBackStartTime = 0;
+static uint8_t reach = 0;
 
+static uint32_t ReturnStartTime = 0;
+static uint8_t returnIndicationDetected = 0;
+static uint16_t returnIndicationCounter = 0;
+static uint32_t returnIndicationStartTime = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -93,11 +103,14 @@ static void MX_TIM4_Init(void);
 void Forward(void);
 void Backward(void);
 void Left(void);
+void LeftFast(void);
 void Right(void);
 void Stop(void);
 void Grip(void);
 void Release(void);
 void ModeLED(uint8_t);
+void parseCommand(char *);
+void parseMultipleCommands(char *);
 /* USER CODE END 0 */
 
 /**
@@ -196,17 +209,39 @@ int main(void)
 		case 4:
 			if(!case2_triggered && (irValue == 0x0))
 			{
-				Forward();
-				case2_triggered = 1;
-				case2_startTick = HAL_GetTick();
-				junctionStartTime = 0;
-				junction2StartTime = 0;
-				RotateStartTime =0;
+			    Forward();
+			    case2_triggered = 1;
+			    case2_startTick = HAL_GetTick();
+
+			    junctionStartTime = 0;
+			    junctionDetected = 0;
+			    junctionCounter = 0;
+			    cooldown1 = 0;
+			    lastSent = 0;
+
+			    junction2StartTime = 0;
+			    junction2Detected = 0;
+			    junction2Counter = 0;
+			    cooldown2 = 0;
+			    lastSentJ2 = 0;
+
+			    RotateStartTime = 0;
+			    rotated = 0;
+
+			    RotateBackStartTime = 0;
+			    reach = 0;
+
+			    ReturnStartTime = 0;
+			    returnIndicationStartTime = 0;
+			    returnIndicationCounter = 0;
+			    returnIndicationDetected = 0;
+
+			    j2StopTrigger = 0;
 			}
 
 			if(case2_triggered && !j2StopTrigger)
 			{
-				if(HAL_GetTick() - case2_startTick >= 1000)
+				if(HAL_GetTick() - case2_startTick >= SB)
 				{
 					if ((mode == 3 && junctionCounter >= 2 && junction2Counter <= 1) ||
 							(mode == 4 && junctionCounter >= 2 && junction2Counter <= 2))
@@ -246,15 +281,15 @@ int main(void)
 						}
 					}
 
-			        if(HAL_GetTick() - case2_startTick >= 4000)
+			        if(HAL_GetTick() - case2_startTick >= J1B)
 			        {
 						if (irValue == 0b0111)
 						{
 		                    if(junctionStartTime == 0)
 		                        junctionStartTime = HAL_GetTick();
-		                    else if(HAL_GetTick() - junctionStartTime >= 120)
+		                    else if(HAL_GetTick() - junctionStartTime >= J1F)
 		                    {
-		                        if(!junctionDetected && (HAL_GetTick() - cooldown1 >= 2000))
+		                        if(!junctionDetected && (HAL_GetTick() - cooldown1 >= 3000))
 		                        {
 		                            junctionCounter++;
 		                            junctionDetected = 1;
@@ -283,13 +318,13 @@ int main(void)
 			            if(j2StartTick == 0)
 			            	j2StartTick = HAL_GetTick();
 
-			            if(HAL_GetTick() - j2StartTick >= 750)
+			            if(HAL_GetTick() - j2StartTick >= J2B)
 			            {
 			            	if(irValue == 0b1110)
 			            	{
 								if(junction2StartTime == 0)
 									junction2StartTime = HAL_GetTick();
-								else if(HAL_GetTick() - junction2StartTime >= 50)
+								else if(HAL_GetTick() - junction2StartTime >= J2F)
 								{
 									if(!junction2Detected && (HAL_GetTick()-cooldown2 >= 350))
 									{
@@ -324,7 +359,7 @@ int main(void)
 			        }
 				}
 			}
-			else if (j2StopTrigger==1)
+			else if (j2StopTrigger == 1)
 			{
 			    if (RotateStartTime == 0)
 			    {
@@ -332,7 +367,7 @@ int main(void)
 			    	RotateStartTime = HAL_GetTick();
 			    }
 
-			    if (!rotated && (HAL_GetTick() - RotateStartTime >= 500))
+			    if (!rotated && (HAL_GetTick() - RotateStartTime >= R1B))
 			    {
 			        if (irValue == 0b0110)
 			        {
@@ -372,9 +407,129 @@ int main(void)
 			        }
 				}
 			}
-			else if(j2StopTrigger==2)
+			else if(j2StopTrigger == 2)
+			{
+				if(RotateBackStartTime == 0)
+				{
+					LeftFast();
+					RotateBackStartTime = HAL_GetTick();
+				}
+
+				if (HAL_GetTick() - RotateBackStartTime < RBS)
+				{
+					if(!reach && (HAL_GetTick() - RotateBackStartTime >= LL))
+					{
+						LeftFast();
+
+						if (irValue == 0b0110)
+						{
+							reach = 1;
+							settleStart = HAL_GetTick();
+							Stop();
+						}
+					}
+					else if(reach)
+					{
+						if(HAL_GetTick() - settleStart < 200)
+							Stop();
+						else
+						{
+							if (mode==2 || mode ==3)
+							{
+								switch(irValue)
+								{
+									case 0b0110:
+										Forward();
+										break;
+									case 0b0100:case 0b1000:case 0b1100:case 0b1110:
+										Left();
+										break;
+									case 0b0010:case 0b0001:case 0b0011:case 0b0111:case 0b0000:case 0b1111:
+										Right();
+										break;
+									default:
+										Left();
+										break;
+								}
+							}
+							else
+							{
+								switch(irValue)
+								{
+									case 0b0110:
+										Forward();
+										break;
+									case 0b0100:case 0b1000:case 0b1100:case 0b1110:case 0b1111:
+										Left();
+										break;
+									case 0b0010:case 0b0001:case 0b0011:case 0b0111:case 0b0000:
+										Right();
+										break;
+									default:
+										Left();
+										break;
+								}
+							}
+						}
+					}
+				}
+				else
+					j2StopTrigger = 3;
+			}
+			else if(j2StopTrigger==3)
+			{
+				if (ReturnStartTime == 0)
+					ReturnStartTime = HAL_GetTick();
+
+				switch(irValue)
+				{
+					case 0b0110:
+						Forward();
+						break;
+					case 0b0100:case 0b1110:case 0b1000:case 0b1100:case 0b0000:case 0b1111:
+						Left();
+						break;
+					case 0b0010:case 0b0001:case 0b0011:case 0b0111:
+						Right();
+						break;
+					default:
+						Left();
+						break;
+				}
+
+		        if(HAL_GetTick() - ReturnStartTime >= RB)
+		        {
+					if (irValue == 0b1111)
+					{
+	                    if(returnIndicationStartTime == 0)
+	                    	returnIndicationStartTime = HAL_GetTick();
+	                    else if(HAL_GetTick() - returnIndicationStartTime >= RIF)
+	                    {
+	                        if(!returnIndicationDetected)
+	                        {
+	                            returnIndicationCounter++;
+	                            returnIndicationDetected = 1;
+	                        }
+	                    }
+					}
+
+	                else
+	                {
+	                	returnIndicationStartTime = 0;
+	                	returnIndicationDetected = 0;
+	                }
+
+					if (returnIndicationCounter==1)
+					{
+						j2StopTrigger = 4;
+						Stop();
+					}
+		        }
+			}
+			else if (j2StopTrigger == 4)
 			{
 				Stop();
+				Release();
 			}
 			break;
 		default:
@@ -663,45 +818,95 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-    if (huart->Instance == USART1)
-    {
-        switch(rxByte)
-        {
-            case 'm':
-                mode = 1;
-                break;
-            case '1':
-                mode = 2;
-                break;
-            case '2':
-                mode = 3;
-                break;
-            case '3':
-                mode = 4;
-                break;
-            case 'f':
-            case 'b':
-            case 'l':
-            case 'r':
-            case 's':
-            	if (mode == 1)
-            		control = rxByte;
-            	break;
-            default:
-                break;
-        }
-        switch(rxByte)
-        {
-            case 'G':
-            case 'R':
-            	if (mode == 1)
-            		servo = rxByte;
-            	break;
-            default:
-                break;
-        }
+	if (huart->Instance == USART1)
+	{
+	    if (rxByte != '\n' && rxByte != '\r')
+	    {
+	        if (uartIndex < sizeof(uartBuffer) - 1)
+	            uartBuffer[uartIndex++] = rxByte;
+	        else
+	            uartIndex = 0;
+	    }
+	    else
+	    {
+	        if (uartIndex == 0)
+	        {
+	            HAL_UART_Receive_IT(&huart1, &rxByte, 1);
+	            return;
+	        }
+	        uartBuffer[uartIndex] = '\0';
 
-        HAL_UART_Receive_IT(&huart1, &rxByte, 1);
+	        if (strchr(uartBuffer, '=') != NULL)
+	        {
+	            parseMultipleCommands(uartBuffer);
+	        }
+	        else if (uartIndex == 1)
+	        {
+	            char c = uartBuffer[0];
+
+	            switch(c)
+	            {
+	                case 'm': mode = 1; break;
+	                case '1': mode = 2; break;
+	                case '2': mode = 3; break;
+	                case '3': mode = 4; break;
+
+	                case 'f':
+	                case 'b':
+	                case 'l':
+	                case 'r':
+	                case 's':
+	                    if (mode == 1) control = c;
+	                    break;
+
+	                case 'G':
+	                case 'R':
+	                    if (mode == 1) servo = c;
+	                    break;
+
+	                default:
+	                    break;
+	            }
+	        }
+	        uartIndex = 0;
+	    }
+	    HAL_UART_Receive_IT(&huart1, &rxByte, 1);
+	}
+}
+
+void parseCommand(char *cmd)
+{
+    char name[10];
+    int value;
+
+    if (sscanf(cmd, "%[^=]=%d", name, &value) == 2)
+    {
+        if (value < 0) value = 0;
+        if (value > 10000) value = 10000;
+
+        if      (strcmp(name, "SB") == 0)   SB = value;
+        else if (strcmp(name, "J1B") == 0)  J1B = value;
+        else if (strcmp(name, "J1F") == 0)  J1F = value;
+        else if (strcmp(name, "J2B") == 0)  J2B = value;
+        else if (strcmp(name, "J2F") == 0)  J2F = value;
+        else if (strcmp(name, "R1B") == 0)  R1B = value;
+        else if (strcmp(name, "RBS") == 0)  RBS = value;
+        else if (strcmp(name, "LL") == 0)  LL = value;
+//        else if (strcmp(name, "BWB") == 0)  BWB = value;
+//        else if (strcmp(name, "R2B") == 0)  R2B = value;
+        else if (strcmp(name, "RB") == 0)   RB = value;
+        else if (strcmp(name, "RIF") == 0)  RIF = value;
+    }
+}
+
+void parseMultipleCommands(char *line)
+{
+    char *cmd = strtok(line, ",");
+
+    while (cmd != NULL)
+    {
+        parseCommand(cmd);
+        cmd = strtok(NULL, ",");
     }
 }
 
@@ -725,8 +930,8 @@ void Forward(void)
 
 void Backward(void)
 {
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 59);
-	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 59);
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 49);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 49);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 0);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 1);
@@ -735,8 +940,18 @@ void Backward(void)
 
 void Left(void)
 {
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 49);
-	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 49);
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 54);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 54);
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 0);
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 0);
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, 1);
+}
+
+void LeftFast(void)
+{
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 69);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 69);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 0);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 0);
@@ -745,8 +960,8 @@ void Left(void)
 
 void Right(void)
 {
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 49);
-	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 49);
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 54);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 54);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 0);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 1);
