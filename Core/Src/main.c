@@ -51,12 +51,13 @@ uint8_t rxByte;
 uint8_t buttonPrev = 1;
 uint32_t buttonDebounce = 0;
 volatile uint8_t mode = 1;
+volatile uint8_t manualReturnFlag = 0;
 uint8_t prev_mode = 1;
 volatile uint8_t control = 's';
 volatile uint8_t servo = 'R';
 char uartBuffer[32];
 uint8_t uartIndex = 0;
-volatile uint16_t SB=600, J1B=6000, J1F=125, J2B=1500, J2F=125, R1B=500, RBS=6000, LL=1000, RB=8000, RIF=120;
+volatile uint16_t SB=600, J1B=6000, J1F=125, J2B=1500, J2F=125, R1B=500, RBS=6000, LL=1000, RB=8000, RIF=120, CD2 =400;
 uint8_t irValue = 0;
 
 static uint8_t case2_triggered = 0;
@@ -101,6 +102,7 @@ static void MX_TIM4_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 void Forward(void);
+void ForwardFast(void);
 void Backward(void);
 void Left(void);
 void LeftFast(void);
@@ -262,6 +264,24 @@ int main(void)
 								break;
 						}
 					}
+					else if((mode == 4 && junctionCounter >= 2 && junction2Counter > 2)||(mode == 3 && junctionCounter >= 2 && junction2Counter > 1))
+					{
+						switch(irValue)
+						{
+							case 0b0110:case 0b1110:
+								Forward();
+								break;
+							case 0b0100:case 0b1000:case 0b1100:case 0b0000:case 0b1111:
+								Left();
+								break;
+							case 0b0010:case 0b0001:case 0b0011:case 0b0111:
+								Right();
+								break;
+							default:
+								Stop();
+								break;
+						}
+					}
 					else
 					{
 						switch(irValue)
@@ -326,7 +346,7 @@ int main(void)
 									junction2StartTime = HAL_GetTick();
 								else if(HAL_GetTick() - junction2StartTime >= J2F)
 								{
-									if(!junction2Detected && (HAL_GetTick()-cooldown2 >= 350))
+									if(!junction2Detected && (HAL_GetTick()-cooldown2 >= CD2))
 									{
 										junction2Counter++;
 										junction2Detected = 1;
@@ -409,6 +429,11 @@ int main(void)
 			}
 			else if(j2StopTrigger == 2)
 			{
+				if(manualReturnFlag == 1)
+				{
+					mode = 1;
+				}
+
 				if(RotateBackStartTime == 0)
 				{
 					LeftFast();
@@ -434,17 +459,17 @@ int main(void)
 							Stop();
 						else
 						{
-							if (mode==2 || mode ==3)
+							if (mode==2 || mode==3)
 							{
 								switch(irValue)
 								{
-									case 0b0110:
-										Forward();
+									case 0b0110:case 0b1111:
+										ForwardFast();
 										break;
 									case 0b0100:case 0b1000:case 0b1100:case 0b1110:
 										Left();
 										break;
-									case 0b0010:case 0b0001:case 0b0011:case 0b0111:case 0b0000:case 0b1111:
+									case 0b0010:case 0b0001:case 0b0011:case 0b0111:case 0b0000:
 										Right();
 										break;
 									default:
@@ -456,10 +481,10 @@ int main(void)
 							{
 								switch(irValue)
 								{
-									case 0b0110:
-										Forward();
+									case 0b0110:case 0b1111:
+										ForwardFast();
 										break;
-									case 0b0100:case 0b1000:case 0b1100:case 0b1110:case 0b1111:
+									case 0b0100:case 0b1000:case 0b1100:case 0b1110:
 										Left();
 										break;
 									case 0b0010:case 0b0001:case 0b0011:case 0b0111:case 0b0000:
@@ -847,9 +872,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	            switch(c)
 	            {
 	                case 'm': mode = 1; break;
-	                case '1': mode = 2; break;
-	                case '2': mode = 3; break;
-	                case '3': mode = 4; break;
+	                case '1': manualReturnFlag = 0; mode = 2; break;
+	                case '2': manualReturnFlag = 0; mode = 3; break;
+	                case '3': manualReturnFlag = 0; mode = 4; break;
 
 	                case 'f':
 	                case 'b':
@@ -892,8 +917,10 @@ void parseCommand(char *cmd)
         else if (strcmp(name, "R1B") == 0)  R1B = value;
         else if (strcmp(name, "RBS") == 0)  RBS = value;
         else if (strcmp(name, "LL") == 0)  LL = value;
-//        else if (strcmp(name, "BWB") == 0)  BWB = value;
-//        else if (strcmp(name, "R2B") == 0)  R2B = value;
+        else if (strcmp(name, "CD2") == 0)  CD2 = value;
+        else if (strcmp(name, "1m") == 0)  {mode = 2 ; manualReturnFlag = value;}
+        else if (strcmp(name, "2m") == 0)  {mode = 3 ; manualReturnFlag = value;}
+        else if (strcmp(name, "3m") == 0)  {mode = 4 ; manualReturnFlag = value;}
         else if (strcmp(name, "RB") == 0)   RB = value;
         else if (strcmp(name, "RIF") == 0)  RIF = value;
     }
@@ -922,6 +949,16 @@ void Forward(void)
 {
 	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 59);
 	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 59);
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
+	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 0);
+	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, 0);
+}
+
+void ForwardFast(void)
+{
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 79);
+	__HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, 79);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_5, 1);
 	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, 1);
 	HAL_GPIO_WritePin(GPIOA, GPIO_PIN_11, 0);
